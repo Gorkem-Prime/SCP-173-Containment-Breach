@@ -13,7 +13,7 @@ tek başına çalışan bir Blitz3D mini oyunu.
 - **Mekanik:** Orijinal `NPCs.bb`'deki bakma/göz kırpma kuralı, kovalama,
   teleport ve öldürme kodu taşındı. Gözler kapalıyken veya SCP-173 görüş
   alanı dışındayken hareket eder; baktığınız sürece donar. 173 artık duvar
-  arkasına da geçebilir: her adımı 360° ışın (raycast) taramasıyla seçer,
+  arkasına da geçebilir: her adımı 1 birimlik ızgara üzerinde A* ile yol bulur, her adımı ışın taramasıyla doğrular,
   duvarların içinden geçmez ve haritanın dışına çıkamaz.
 - **Sesler:** `SFX\SCP\173\` (StoneDrag, Rattle, NeckSnap) ve
   `SFX\Door\DoorOpen173.ogg` — orijinal dosyalar.
@@ -46,7 +46,7 @@ tek başına çalışan bir Blitz3D mini oyunu.
    sonra haritanın bir köşesine çekilip orada bekler.
 9. **ESC** ile oyunu durdurup (RESUME / RESTART ROUND / MAIN MENU / LEAVE LAN / QUIT)
    menüsüne erişebilirsiniz. **F11** ile 1920x1080 tam ekran / 1280x720
-   pencere modu arasında geçiş yapabilirsiniz.
+   pencere modu arasında geçiş yapabilirsiniz (tam ekran ekranı tamamen kaplar).
 10. Menülerde fareyle tıklama veya klavye ile seçim yapılabilir: ana menüde
    `1=PLAY 2=SETTINGS 3=MULTIPLAYER 4=QUIT`, ESC menüsünde `1=RESUME 2=RESTART 3=MAIN MENU
    4=QUIT`, ayarlarda `1=fullscreen 2=çözünürlük 3/4=hassasiyet 5/6=ses
@@ -58,7 +58,10 @@ tek başına çalışan bir Blitz3D mini oyunu.
 12. **P90 (`P90.bb`):** Oyun içinde **1** tuşu P90'ı CS tarzı alttan yukarı
     kaldırır / geri indirir. **Sol fare tuşunu basılı tutmak** otomatik ateş
     eder: namlu alevi, ileri uçan izli mermi, duvara çarpınca kıvılcım.
-    Geri tepme **sadece silahadır ve geriye doğrudur** (kamera tepmez).
+    Geri tepme **sadece silahadır ve geriye doğrudur** (kamera tepmez). Mermi
+    nişangâhın gösterdiği noktaya gider; duvarda normal hizasında yanık izi,
+    genişleyen şok dalgası ve kıvılcım oluşur. Namlu alevi animasyonlu,
+    eklemeli (additive) sprite'tır.
     **R** ile şarjör değiştirme animasyonu oynar. Sağ altta mermi/rezerv
     sayacı gösterilir. Yürürken/koşarken silah sallanır, dönünce geride kalır.
     Model `SimpleProjectBlitz3D` demosundan; sesler gerçek CS:GO P90
@@ -66,7 +69,7 @@ tek başına çalışan bir Blitz3D mini oyunu.
 13. **Görsel efektler (`FX.bb`):** kamera titremesi/roll, koşu FOV'u, yürüyüş
     sallanması, titreyen floresan ışıklar, kameraya bağlı el feneri ve ihlal
     anında devreye giren kırmızı acil durum ışıkları **her zaman açıktır**.
-    Ekranda parçacık/grain, vignette, tarama çizgisi veya yansıma yoktur.
+    Ekranda parçacık/grain, vignette veya tarama çizgisi yoktur.
     Konsol/uçma modu kaldırıldı. SCP-173 her kare
     harita sınırları içine sabitlenir, düşemez ve dışarı çıkamaz.
 14. **MULTIPLAYER** menüsünden LAN üzerinde oda oluşturabilir veya açık odalara
@@ -75,12 +78,30 @@ tek başına çalışan bir Blitz3D mini oyunu.
     portunu açar; SCP-173'ü host yönetir. Diğer oyuncular turuncu D-class
     kıyafetleriyle, üstlerinde `D-...` / `HOST` etiketiyle görünür; biri 173'ü
     izliyorsa etiketinde `WATCHING` yazar. SCP-173 yalnızca **hiç kimse** ona
-    bakmadığında hareket eder ve her zaman en yakın oyuncuyu değil, gördüğü /
-    son gördüğü oyuncuyu kovalar. Host odadan çıkarsa (BYE veya bağlantı
+    gerçekten (duvar olmadan) bakmadığında hareket eder; duvarın arkasından
+    ona doğru bakan, kovalanmayan oyuncu onu durduramaz. Her zaman en yakın
+    oyuncuyu değil, gördüğü / son gördüğü oyuncuyu kovalar. Bir oyuncu çıkarsa
+    veya bağlantısı koparsa bedeni silinir ve 173 onu hedef olarak unutur;
+    yeni gelen oyuncu yeniden fark edilir. Host odadan çıkarsa (BYE veya bağlantı
     kopması) bütün oyuncular ana menüye atılır. **ESC** ile açılan menüden
     `MAIN MENU` LAN bağlantısını kapatmaz; bağlantıyı kapatmak için `LEAVE LAN`
     (`6`) kullanılır. Kısayollar: `1=CREATE ROOM 2=JOIN ROOM 3=BACK
     4=LEAVE LAN`.
+15. **Yansımalar (`Reflections.bb`):** iki klasik Blitz3D/DirectX7 tekniği eklendi.
+    - **Specular:** Mikkel Fredborg'un "additive blend + siyah fırça rengi +
+      shininess 0.5" yöntemiyle ikinci bir kopya çizilir; sadece ışıkların
+      parlak yansıması görünür. Zeminde prosedürel bir parlaklık haritası,
+      SCP-173'te ise modelle gelen `173_Spec.jpg` kullanılır.
+    - **Küp haritası (cubemap):** D-Grafix'in yansımalı su demosundaki altı
+      yüzlü gerçek zamanlı küp kamerası alındı; **su oluşturulmaz**. Küp dokusu
+      haritanın görünür mesh'inden kopyalanan yansıma katmanına uygulanır.
+      Bu kopya her odanın zemin/duvar yüzeylerinin **gerçek yüksekliğini**
+      korur; sabit düz bir düzlem kullanılmadığı için yansıma yalnızca
+      173 odasında değil hücrelerde ve koridorlarda da görünür. Zemin ve
+      duvarlar hücreleri, odayı ve titreyen ışıkları yansıtır. Donanım küp haritasını
+      desteklemiyorsa (`GfxDriverCaps3D() < 110`) yalnızca specular katmanları
+      kalır. Küp 256×256'dır ve her 3 karede bir yenilenir; yoğunluk/renk
+      ayarları `Reflections.bb` içindeki `RF_*` değişkenlerindedir.
 
 ## Ayarlar
 
@@ -91,6 +112,21 @@ gerekir).
 
 Görsel efektlerin aç/kapat tuşu yoktur; hepsi her zaman açıktır. `options.ini`
 dosyasındaki `[fx]` bölümü kullanılmaz (artık gerekli değildir).
+
+## BlitzMax NG sürümü (deneysel)
+
+`bmx/` klasörü, aynı oyunun **BlitzMax NG + OpenB3D (`b3d.mod-master`)**
+portudur. Derleme:
+
+```
+$env:BM_HOME = (Resolve-Path .\BlitzMax).Path
+& .\BlitzMax\bin\bmk.exe makeapp -o "SCP-173 Containment Breach BMX.exe" "bmx\Main.bmx"
+```
+
+OpenB3D modülleri `BlitzMax\mod\b3d.mod\` altına kuruldu ve derlendi.
+Bu sürümde TCP multiplayer çalışır; **UDP oda keşfi geçici olarak kapalıdır**
+(`bmx\Compat.bmx`). Ayrıca `ResizeImage` ve metin hizalama basitleştirildi.
+Eski Blitz3D 1.108 exe'si (`SCP-173 Containment Breach.exe`) korunuyor.
 
 ## Derleme
 

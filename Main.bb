@@ -18,6 +18,7 @@ Include "Menu.bb"
 Include "Multiplayer.bb"
 Include "FX.bb"
 Include "P90.bb"
+Include "Reflections.bb"
 
 ; ---------------------------------------------------------------------
 ; Settings
@@ -39,7 +40,7 @@ Else
 End If
 
 If FullScreen Then
-	Graphics3D GraphW, GraphH, 0, 1
+	Graphics3D GraphW, GraphH, 0, 1   ; true fullscreen - always covers the screen
 Else
 	Graphics3D GraphW, GraphH, 0, 2
 End If
@@ -82,6 +83,12 @@ End Function
 ; the old world is torn down first and rebuilt afterwards. Doing the
 ; Graphics3D call on top of a live world is what caused the occasional
 ; "memory access violation".
+; Switching between windowed and borderless fullscreen has to create a brand
+; new Direct3D device. Everything that lives in video memory (textures of the
+; map, 173, the P90, every image and font) is destroyed by that switch, so
+; the old world is torn down first and rebuilt afterwards. Doing the
+; Graphics3D call on top of a live world is what caused the occasional
+; "memory access violation".
 Function ToggleFullscreen()
 	Local oldState% = GameState
 	Local hasWorld% = (Camera <> 0)
@@ -119,7 +126,7 @@ Function ToggleFullscreen()
 
 	FullScreen = 1 - FullScreen
 	If FullScreen Then
-		; fullscreen is always 1920 x 1080
+		; 1920x1080 true fullscreen (no border, covers the whole screen)
 		GraphW = 1920 : GraphH = 1080
 		Graphics3D GraphW, GraphH, 0, 1
 	Else
@@ -197,6 +204,7 @@ Function DestroyWorld()
 	; bullets / impact sparks own entities that ClearWorld is about to free
 	P90_Reset()
 	ClearWorld()
+	RF_Reset()
 	NetClearAvatarRefs()
 	; LoadRoomMesh caches texture handles - ClearWorld just freed them, so
 	; the cache must be emptied or a rebuilt map would use dead textures
@@ -205,6 +213,7 @@ Function DestroyWorld()
 	Camera = 0
 	Collider = 0
 	RoomObj = 0
+	RoomOpaque = 0
 	N173_Collider = 0
 	N173_Obj = 0
 	N173_Box = 0
@@ -214,6 +223,8 @@ Function DestroyWorld()
 	P90_Obj = 0
 	P90_Light = 0
 	P90_Held = 0
+	P90_FlashTex = 0 : P90_ScorchTex = 0 : P90_ShockTex = 0
+	P90_ScorchTemplate = 0 : P90_ShockTemplate = 0
 End Function
 
 ; ---------------------------------------------------------------------
@@ -298,6 +309,9 @@ Repeat
 			; collision detection / entity updates (required for the floor!)
 			UpdateWorld()
 			LockHeights()
+
+			; refresh the floor's cube map, then draw the real frame
+			RF_UpdateCubemaps(Camera)
 
 			RenderWorld
 			FX_DrawScreen()

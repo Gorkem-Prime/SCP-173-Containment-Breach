@@ -49,6 +49,25 @@ Global N173HomeX#, N173HomeY#, N173HomeZ#
 ; instantly switching to whoever happens to be closest.
 Global N173_TargetStream% = -1
 Global N173_TargetX# = 0.0, N173_TargetZ# = 0.0
+; True only while the current target is in clear line of sight: then 173
+; walks straight at him; without LOS it must use the A* route.
+Global N173_DirectChase% = False
+; How much room the statue needs when raycasting. Small enough to squeeze
+; through the map's very narrow gaps; temporarily halved in "squeeze mode".
+Global N173_Clearance# = 0.12
+Global N173_SqueezeFrames% = 0
+
+; ----- pathfinding ----------------------------------------------------
+; 1 unit grid over the playable box. A*) gives 173 a real route around
+; walls instead of letting it walk straight into geometry.
+Const N173_GX0% = -31, N173_GZ0% = -12, N173_GNX% = 37, N173_GNZ% = 17
+Const N173_NODES% = 629
+Dim N173WalkCache%(629)
+Dim N173PrevNode%(629)
+Dim N173Queue%(640)
+Dim N173PathNodes%(640)
+Global N173PathLen% = 0, N173PathIdx% = 0, N173PathGoal% = -1
+Global N173PathTimer% = 0
 
 ; ----- containment door ---------------------------------------------
 Global DoorPivot%, DoorLeft%, DoorRight%
@@ -231,8 +250,8 @@ Function BuildWorld()
 	Camera = CreateCamera()
 	CameraRange Camera, 0.05, 90.0
 	CameraFogMode Camera, 1
-	CameraFogRange Camera, 8.0, 55.0
-	CameraFogColor Camera, 0, 0, 0
+	CameraFogRange Camera, 6.0, 48.0
+	CameraFogColor Camera, 16, 18, 22   ; cold concrete haze, like the FPS example
 
 	; visual effects: headlamp, flickering lights
 	FX_Build()
@@ -362,6 +381,9 @@ Function BuildWorld()
 	SpawnX = -4096 * RoomScale : SpawnY = 0.3 : SpawnZ = 192 * RoomScale
 	N173HomeX = 1472 * RoomScale : N173HomeY = 0.35 : N173HomeZ = 912 * RoomScale
 
+	; specular layers + the real-time cube map reflected by the floor
+	RF_Init()
+
 	ResetRound()
 	; rebuild the remote player figures on the new world
 	NetRebuildAvatars()
@@ -381,6 +403,9 @@ Function ResetRound()
 	N173_Active = False
 	N173_EnemyX = 0 : N173_EnemyZ = 0
 	N173_TargetStream = -1 : N173_TargetX = 0 : N173_TargetZ = 0
+	N173PathLen = 0 : N173PathIdx = 0 : N173PathGoal = -1 : N173PathTimer = 0
+	N173ClearPathCache()
+	N173_SqueezeFrames = 0
 	N173_State = 0 : N173_PrevX = N173HomeX : N173_PrevZ = N173HomeZ
 	N173_LastDist = 0 : N173_Drop = 0
 	HideEntity N173_Box
@@ -427,6 +452,40 @@ Function Keep173InBounds()
 	Local z# = Clamp(EntityZ(N173_Collider, True), -13.0, 5.0)
 	PositionEntity N173_Collider, x, 0.35, z, True
 	ResetEntity N173_Collider
+
+	; emergency recovery: if collision response ever pushed the statue into
+	; geometry, move it to the closest open grid cell instead of leaving it
+	; stuck inside a wall
+	If N173Embedded() = 0 Then Return
+	Local sx% = Int(x - N173_GX0 + 0.5), sz% = Int(z - N173_GZ0 + 0.5)
+	Local r%, dx%, dz%, node%
+	For r = 0 To 4
+		For dz = -r To r
+			For dx = -r To r
+				If Abs(dx) = r Or Abs(dz) = r Then
+					node = N173NodeIndex(sx + dx, sz + dz)
+					If node >= 0 And N173NodeOpen(node) Then
+						PositionEntity N173_Collider, N173NodeX(node), 0.35, N173NodeZ(node), True
+						ResetEntity N173_Collider
+						Return
+					End If
+				End If
+			Next
+		Next
+	Next
+End Function
+
+; Very short 360 degree probe: fewer than two clear directions means the
+; collider is embedded in geometry and must be rescued.
+Function N173Embedded%()
+	If N173_Collider = 0 Then Return False
+	Local x# = EntityX(N173_Collider, True), z# = EntityZ(N173_Collider, True)
+	Local clear% = 0, i%
+	For i = 0 To 7
+		Local a# = i * 45.0
+		If N173RayClearFrom(x, z, Sin(a), Cos(a), 0.35) Then clear = clear + 1
+	Next
+	Return clear < 2
 End Function
 
 ; collision response in UpdateWorld() can push both colliders down into
@@ -562,6 +621,7 @@ Function UpdateDoor()
 		If d < 9.0 Or KeyHit(18) And d < 12.0 Then
 			DoorOpened = True
 			N173_Active = True
+			N173ClearPathCache()
 			PlaySound DoorOpen173Snd
 			FX_OnBreach()
 			HintMSG = "CONTAINMENT BREACH - SCP-173 IS LOOSE. DO NOT BLINK."
@@ -593,11 +653,21 @@ Function Update173()
 		Return
 	End If
 
+	If N173_SqueezeFrames > 0 Then N173_SqueezeFrames = N173_SqueezeFrames - 1
+
+	; offline always chases the local player, with a live target position
+	If NetMode = NET_OFFLINE Then
+		N173_TargetStream = 0
+		N173_TargetX = EntityX(Collider, True) : N173_TargetZ = EntityZ(Collider, True)
+	End If
+
 	; distance to the CURRENT target (not simply the closest player)
 	Local tx0# = N173_TargetX, tz0# = N173_TargetZ
 	If N173_TargetStream <= 0 Then
 		tx0 = EntityX(Collider, True) : tz0 = EntityZ(Collider, True)
 	End If
+	N173_DirectChase = False
+	If N173_TargetStream >= 0 Then N173_DirectChase = N173LOSClearTo(tx0, tz0)
 	Local dist# = Distance(EntityX(N173_Collider, True), EntityZ(N173_Collider, True), tx0, tz0)
 
 	; proximity drives the red danger vignette and the FOV tightening
@@ -724,6 +794,16 @@ End Function
 ; Multiplayer targeting - 173 sticks to a target instead of always
 ; switching to whoever is closest.
 ; =====================================================================
+; A remote player disconnected: drop him as a target and forget his path.
+Function N173RejectTarget(stream%)
+	If N173_TargetStream = stream% Then
+		N173_TargetStream = -1
+		N173_EnemyX = 0 : N173_EnemyZ = 0
+		N173PathLen = 0 : N173PathIdx = 0 : N173PathGoal = -1
+		N173ClearPathCache()
+	End If
+End Function
+
 Function N173PlayerExists%(stream%)
 	If stream% < 0 Then Return False
 	If stream% = 0 Then Return True
@@ -759,6 +839,15 @@ Function N173PlayerWatching%(stream%)
 		If rp\stream = stream% Then Return Abs(rp\observing)
 	Next
 	Return 0
+End Function
+
+; Full-length line of sight to a point (no artificial 10-unit limit).
+Function N173LOSClearTo%(x#, z#)
+	Local cx# = EntityX(N173_Collider, True), cz# = EntityZ(N173_Collider, True)
+	Local dx# = x - cx, dz# = z - cz
+	Local dl# = Sqr(dx * dx + dz * dz)
+	If dl < 0.35 Then Return True
+	Return N173RayClearFrom(cx, cz, dx / dl, dz / dl, dl)
 End Function
 
 ; Can 173 see this player from where it stands right now?
@@ -834,29 +923,49 @@ End Function
 ; =====================================================================
 ; SCP-173 navigation - 360 degree raycasts
 ; =====================================================================
-; One ray from a world point; returns True when nothing (except the
-; player / the statue itself) blocks it.
+; One ray bundle from a world point. The statue has a body, not a single
+; point: cast the centre line plus two parallel lines at its sides, starting
+; AT the current position (never 0.3 units ahead, which skipped walls right
+; next to it). Returns True only when the whole body fits through.
 Function N173RayClearFrom%(x#, z#, dx#, dz#, dist#)
-	If dist < 0.35 Then Return True
-	Local hit% = LinePick(x + dx * 0.30, 0.42, z + dz * 0.30, dx * (dist - 0.30), 0, dz * (dist - 0.30))
-	If hit = 0 Then Return True
-	Local e% = PickedEntity()
-	If e = Collider Or e = N173_Collider Or e = N173_Obj Or e = N173_HitBox Or e = N173_Box Then Return True
-	Return False
+	Local dl# = Sqr(dx * dx + dz * dz)
+	If dl < 0.001 Or dist < 0.05 Then Return True
+	dx = dx / dl : dz = dz / dl
+	Local px# = -dz, pz# = dx
+	Local off# = N173_Clearance
+	If N173_SqueezeFrames > 0 Then off = 0.055
+	Local i%, ok% = True
+	For i = -1 To 1
+		Local ox# = x + px * off * i, oz# = z + pz * off * i
+		Local hit% = LinePick(ox, 0.42, oz, dx * dist, 0, dz * dist)
+		If hit <> 0 Then
+			Local e% = PickedEntity()
+			If e <> Collider And e <> N173_Collider And e <> N173_Obj And e <> N173_HitBox And e <> N173_Box Then
+				ok = False
+				Exit
+			End If
+		End If
+	Next
+	Return ok
 End Function
 
 Function N173DirClear%(dx#, dz#, dist#)
 	Return N173RayClearFrom(EntityX(N173_Collider, True), EntityZ(N173_Collider, True), dx, dz, dist)
 End Function
 
-; Is (x,z) an open walkable spot (not embedded in a wall)?
+; Is (x,z) an open walkable spot? Narrow corridors matter here: a corridor
+; only has two clear sides, so require one clear OPPOSITE pair instead of
+; counting all eight directions.
 Function N173SpotOpen%(x#, z#)
-	Local clear% = 0, i%
+	; short 360 degree scan: a very narrow corridor may only have a few
+	; clear directions, so three out of eight is enough. Movement itself is
+	; still validated separately by N173MoveToward.
+	Local i%, clear% = 0
 	For i = 0 To 7
 		Local a# = i * 45.0
-		If N173RayClearFrom(x, z, Sin(a), Cos(a), 1.0) Then clear = clear + 1
+		If N173RayClearFrom(x, z, Sin(a), Cos(a), 0.7) Then clear = clear + 1
 	Next
-	Return clear >= 5
+	Return clear >= 3
 End Function
 
 ; Validated relocation ("it moved while you blinked"). Rejects anything
@@ -865,11 +974,7 @@ Function N173TryRelocate%(tx#, tz#)
 	If tx < -31.5 Or tx > 5.5 Or tz < -12.5 Or tz > 4.5 Then Return False
 
 	Local ox# = EntityX(N173_Collider, True), oz# = EntityZ(N173_Collider, True)
-	Local hit% = LinePick(ox, 0.42, oz, tx - ox, 0, tz - oz)
-	If hit <> 0 Then
-		Local e% = PickedEntity()
-		If e <> Collider And e <> N173_Collider And e <> N173_Obj And e <> N173_HitBox And e <> N173_Box Then Return False
-	End If
+	If Not N173RayClearFrom(ox, oz, tx - ox, tz - oz, Distance(ox, oz, tx, tz)) Then Return False
 	If Not N173SpotOpen(tx, tz) Then Return False
 
 	PositionEntity N173_Collider, tx, 0.35, tz, True
@@ -877,20 +982,199 @@ Function N173TryRelocate%(tx#, tz#)
 	Return True
 End Function
 
-; Walk one step towards (tx,tz). Tries the straight line first and then
-; fans out up to +-162 degrees, so walls and corners are navigated around
-; instead of blocking the statue forever.
-Function N173SteerTo(tx#, tz#)
-	Local cx# = EntityX(N173_Collider, True)
-	Local cz# = EntityZ(N173_Collider, True)
+; ---------- grid pathfinding (walls are never crossed) ----------------
+; The whole playable box is a 1 unit grid. Before a node or an edge is
+; used it is raycast checked, so the resulting route cannot pass through
+; geometry. N173MoveToward validates every single frame as well.
+Function N173NodeIndex%(ix%, iz%)
+	If ix < 0 Or ix >= N173_GNX Or iz < 0 Or iz >= N173_GNZ Then Return -1
+	Return iz * N173_GNX + ix
+End Function
+
+Function N173NodeX#(idx%)
+	Return N173_GX0 + (idx Mod N173_GNX)
+End Function
+
+Function N173NodeZ#(idx%)
+	Return N173_GZ0 + Int(idx / N173_GNX)
+End Function
+
+Function N173NodeOpen%(idx%)
+	If idx < 0 Or idx >= N173_NODES Then Return False
+	If N173WalkCache(idx) = 1 Then Return True
+	If N173WalkCache(idx) = 2 Then Return False
+	Local ok% = N173SpotOpen(N173NodeX(idx), N173NodeZ(idx))
+	If ok Then N173WalkCache(idx) = 1 Else N173WalkCache(idx) = 2
+	Return ok
+End Function
+
+Function N173NearestOpen%(ix%, iz%)
+	Local r%, dx%, dz%, idx%
+	For r = 0 To 5
+		For dz = -r To r
+			For dx = -r To r
+				If Abs(dx) = r Or Abs(dz) = r Then
+					idx = N173NodeIndex(ix + dx, iz + dz)
+					If idx >= 0 And N173NodeOpen(idx) Then Return idx
+				End If
+			Next
+		Next
+	Next
+	Return -1
+End Function
+
+Function N173EdgeClear%(a%, b%)
+	Local ax# = N173NodeX(a), az# = N173NodeZ(a)
+	Local dx# = N173NodeX(b) - ax, dz# = N173NodeZ(b) - az
+	Local d# = Sqr(dx * dx + dz * dz)
+	If d < 0.9 Or d > 1.5 Then Return False
+	Return N173RayClearFrom(ax, az, dx, dz, d)
+End Function
+
+Function N173ClearPathCache()
+	Local i%
+	For i = 0 To N173_NODES - 1 : N173WalkCache(i) = 0 : Next
+	N173PathLen = 0 : N173PathIdx = 0 : N173PathGoal = -1 : N173PathTimer = 0
+End Function
+
+Function N173BuildPath(tx#, tz#)
+	Local i%
+	Local cx# = EntityX(N173_Collider, True), cz# = EntityZ(N173_Collider, True)
+	Local sx% = Int(cx - N173_GX0 + 0.5), sz% = Int(cz - N173_GZ0 + 0.5)
+	Local gx% = Int(tx - N173_GX0 + 0.5), gz% = Int(tz - N173_GZ0 + 0.5)
+	Local start% = N173NearestOpen(sx, sz)
+	Local goal% = N173NearestOpen(gx, gz)
+	N173PathLen = 0 : N173PathIdx = 0 : N173PathGoal = -1
+	If start = -1 Or goal = -1 Then Return
+
+	For i = 0 To N173_NODES - 1 : N173PrevNode(i) = -1 : Next
+	Local head% = 0, tail% = 0, cur%, nb%, found% = False
+	N173Queue(tail) = start : tail = tail + 1
+	N173PrevNode(start) = start
+	While head < tail
+		cur = N173Queue(head) : head = head + 1
+		If cur = goal Then found = True : Exit
+		Local k%, ox%, oz%, ok%
+		For k = 0 To 7
+			ox = 0 : oz = 0
+			Select k
+				Case 0 : ox = 1
+				Case 1 : ox = -1
+				Case 2 : oz = 1
+				Case 3 : oz = -1
+				Case 4 : ox = 1 : oz = 1
+				Case 5 : ox = 1 : oz = -1
+				Case 6 : ox = -1 : oz = 1
+				Case 7 : ox = -1 : oz = -1
+			End Select
+			nb = N173NodeIndex((cur Mod N173_GNX) + ox, Int(cur / N173_GNX) + oz)
+			If nb >= 0 And N173PrevNode(nb) = -1 Then
+				ok = N173NodeOpen(nb) And N173EdgeClear(cur, nb)
+				; never cut a diagonal corner through a wall: both orthogonal
+				; edges out of the current cell must be clear
+				If ok And ox <> 0 And oz <> 0 Then
+					Local side1% = N173NodeIndex((cur Mod N173_GNX) + ox, Int(cur / N173_GNX))
+					Local side2% = N173NodeIndex((cur Mod N173_GNX), Int(cur / N173_GNX) + oz)
+					If side1 < 0 Or side2 < 0 Then
+						ok = False
+					Else
+						If N173EdgeClear(cur, side1) = 0 Or N173EdgeClear(cur, side2) = 0 Then ok = False
+					End If
+				End If
+				If ok Then
+					N173PrevNode(nb) = cur
+					N173Queue(tail) = nb : tail = tail + 1
+				End If
+			End If
+		Next
+	Wend
+	If Not found Then Return
+
+	; reconstruct start -> goal and reverse it
+	Local n% = goal, count% = 0, tmp%
+	While n <> start And count < 600
+		N173PathNodes(count) = n : count = count + 1
+		n = N173PrevNode(n)
+		If n < 0 Then Exit
+	Wend
+	For i = 0 To (count / 2) - 1
+		tmp = N173PathNodes(i)
+		N173PathNodes(i) = N173PathNodes(count - 1 - i)
+		N173PathNodes(count - 1 - i) = tmp
+	Next
+
+	; string-pulling: keep only the farthest node reachable by a clear straight
+	; line. This removes the grid staircase and gives the shortest safe route.
+	Local si% = 0, kept% = 0, j%, lastNode%, ax#, az#, bx#, bz#
+	While si < count
+		ax = N173NodeX(N173PathNodes(si)) : az = N173NodeZ(N173PathNodes(si))
+		If si = 0 Then ax = cx : az = cz
+		lastNode = si : j = si + 1
+		While j < count And j <= si + 16
+			bx = N173NodeX(N173PathNodes(j)) : bz = N173NodeZ(N173PathNodes(j))
+			If N173RayClearFrom(ax, az, bx - ax, bz - az, Distance(ax, az, bx, bz)) Then lastNode = j
+			j = j + 1
+		Wend
+		N173PathNodes(kept) = N173PathNodes(lastNode) : kept = kept + 1
+		si = lastNode + 1
+	Wend
+	count = kept
+
+	N173PathLen = count : N173PathIdx = 0 : N173PathGoal = goal : N173PathTimer = 45
+	; skip waypoints we are already standing on (no backtracking)
+	While N173PathIdx < N173PathLen
+		n = N173PathNodes(N173PathIdx)
+		If Distance(cx, cz, N173NodeX(n), N173NodeZ(n)) > 0.5 Then Exit
+		N173PathIdx = N173PathIdx + 1
+	Wend
+End Function
+
+; One validated step towards a waypoint. Nothing is moved unless both the
+; ray to the destination and the destination itself are wall-free.
+Function N173MoveToward%(wx#, wz#)
+	Local cx# = EntityX(N173_Collider, True), cz# = EntityZ(N173_Collider, True)
+	Local dx# = wx - cx, dz# = wz - cz
+	Local dl# = Sqr(dx * dx + dz * dz)
+	If dl < 0.001 Then Return True
+	Local mv# = N173_Speed * FpsFactor
+	If mv > dl Then mv = dl
+	dx = dx / dl : dz = dz / dl
+	Local nx# = Clamp(cx + dx * mv, -31.5, 5.5)
+	Local nz# = Clamp(cz + dz * mv, -12.5, 4.5)
+	Local attempt%
+	For attempt = 0 To 1
+		; if the normal body width does not fit, squeeze through the gap
+		If attempt = 1 And N173_SqueezeFrames = 0 Then N173_SqueezeFrames = 14
+		If N173RayClearFrom(cx, cz, dx, dz, mv + 0.15) Then
+			If N173SpotOpen(nx, nz) Then
+				; a ray can miss a thin wall edge, so verify the FINAL spot
+				; with a very short 360 degree probe as well
+				Local ox# = EntityX(N173_Collider, True), oz# = EntityZ(N173_Collider, True)
+				PositionEntity N173_Collider, nx, 0.35, nz, True
+				If N173Embedded() Then
+					PositionEntity N173_Collider, ox, 0.35, oz, True
+					Return False
+				End If
+				Keep173InBounds()
+				; Blitz3D yaw: +Z points along (-Sin yaw, Cos yaw)
+				RotateEntity N173_Collider, 0, -ATan2(dx, dz), 0
+				Return True
+			End If
+		End If
+		If N173_SqueezeFrames > 0 Then Exit
+	Next
+	Return False
+End Function
+
+; Reactive fallback for the (rare) case where the grid finds no route:
+; fan out with rays and take the first clear direction, still validated.
+Function N173SteerDirect(tx#, tz#)
+	Local cx# = EntityX(N173_Collider, True), cz# = EntityZ(N173_Collider, True)
 	Local dx# = tx - cx, dz# = tz - cz
 	Local dl# = Sqr(dx * dx + dz * dz)
 	If dl < 0.001 Then Return
-	dx = dx / dl : dz = dz / dl
-
-	Local base# = ATan2(dx, dz)
-	Local chosen# = -999.0
-	Local i%
+	Local base# = ATan2(dx / dl, dz / dl)
+	Local chosen# = -999.0, i%
 	For i = 0 To 18
 		Local off# = 0.0
 		If i > 0 Then
@@ -899,18 +1183,53 @@ Function N173SteerTo(tx#, tz#)
 			If (i Mod 2) = 0 Then off = -off
 		End If
 		Local a# = base + off
-		If N173DirClear(Sin(a), Cos(a), 1.6) Then
-			chosen = a
-			Exit
-		End If
+		If N173DirClear(Sin(a), Cos(a), 1.6) Then chosen = a : Exit
 	Next
 	If chosen = -999.0 Then Return
+	N173MoveToward cx + Sin(chosen) * 2.0, cz + Cos(chosen) * 2.0
+End Function
 
-	Local mv# = N173_Speed * FpsFactor
-	PositionEntity N173_Collider, cx + Sin(chosen) * mv, 0.35, cz + Cos(chosen) * mv, True
-	; Blitz3D yaw: the collider's +Z points along (-Sin yaw, Cos yaw), so the
-	; yaw that faces the chosen direction is -chosen
-	RotateEntity N173_Collider, 0, -chosen, 0
+; Follow the A* route to (tx,tz); rebuild it when the goal moves or a step
+; is blocked. Every step is raycast validated, so walls are never crossed.
+Function N173SteerTo(tx#, tz#)
+	; Clear line of sight: go STRAIGHT at the target. A* (which can detour
+	; around walls) is used only when the target is hidden behind geometry.
+	If N173_DirectChase Then
+		If N173MoveToward(tx, tz) Then
+			N173PathLen = 0 : N173PathIdx = 0 : N173PathGoal = -1
+			Return
+		End If
+	End If
+
+	Local cx# = EntityX(N173_Collider, True), cz# = EntityZ(N173_Collider, True)
+	Local gx% = Int(tx - N173_GX0 + 0.5), gz% = Int(tz - N173_GZ0 + 0.5)
+	gx = Clamp(gx, 0, N173_GNX - 1) : gz = Clamp(gz, 0, N173_GNZ - 1)
+	Local goal% = N173NodeIndex(gx, gz)
+
+	N173PathTimer = N173PathTimer - FpsFactor
+	If N173PathLen = 0 Or N173PathIdx >= N173PathLen Or N173PathGoal <> goal Or N173PathTimer <= 0 Then
+		N173BuildPath tx, tz
+	End If
+
+	If N173PathLen > 0 Then
+		Local node% = N173PathNodes(N173PathIdx)
+		Local wx# = N173NodeX(node), wz# = N173NodeZ(node)
+		If Distance(cx, cz, wx, wz) < 0.35 Then
+			N173PathIdx = N173PathIdx + 1
+			If N173PathIdx >= N173PathLen Then N173PathLen = 0 : Return
+			node = N173PathNodes(N173PathIdx)
+			wx = N173NodeX(node) : wz = N173NodeZ(node)
+		End If
+		If N173MoveToward(wx, wz) Then Return
+		; blocked (geometry changed / bad grid node) - recompute once
+		N173BuildPath tx, tz
+		If N173PathLen > 0 Then
+			node = N173PathNodes(0)
+			N173MoveToward N173NodeX(node), N173NodeZ(node)
+		End If
+		Return
+	End If
+	N173SteerDirect tx, tz
 End Function
 
 ; =====================================================================
@@ -941,6 +1260,8 @@ Function N173HideInCorner()
 	N173_State = 0
 	N173_EnemyX = 0 : N173_EnemyZ = 0
 	N173_TargetStream = -1 : N173_TargetX = N173HomeX : N173_TargetZ = N173HomeZ
+	N173PathLen = 0 : N173PathIdx = 0 : N173PathGoal = -1 : N173PathTimer = 0
+	N173ClearPathCache()
 	N173_PrevX = N173HomeX : N173_PrevZ = N173HomeZ
 	N173_LastDist = 0
 	Keep173InBounds()

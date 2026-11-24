@@ -47,7 +47,7 @@ Type NetRoom
 End Type
 
 ; ----- engine --------------------------------------------------------
-Global Camera%, Collider%, RoomObj%
+Global Camera%, Collider%, RoomObj%, RoomOpaque%
 Global FpsFactor# = 1.0
 Global LastTime%
 Global GameTime# = 0.0
@@ -365,6 +365,7 @@ Function LoadRoomMesh(file$)
 	CreatePivot(root) ; "point entities" slot
 	CreatePivot(root) ; "solid entities" slot
 
+	RoomOpaque = opaque   ; needed by the reflection overlay (walls + floor)
 	Return root
 End Function
 

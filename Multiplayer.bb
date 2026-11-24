@@ -203,6 +203,10 @@ Function NetDisconnect()
 		For rp = Each RemotePlayer
 			If rp\stream <> 0 Then WriteLine rp\stream, "BYE"
 		Next
+	ElseIf NetMode = NET_CLIENT And NetStream <> 0 Then
+		; let the host drop this body immediately instead of waiting for
+		; the keepalive timeout
+		WriteLine NetStream, "BYE"
 	End If
 	If NetServer <> 0 Then CloseTCPServer NetServer
 	If NetStream <> 0 Then CloseTCPStream NetStream
@@ -444,6 +448,12 @@ Function NetApplyLine(line$, rp.RemotePlayer)
 			PositionEntity dest\obj, dest\x, dest\y + 0.9, dest\z
 			RotateEntity dest\obj, 0, dest\yaw, 0
 		End If
+		; a newly connected player is noticed immediately: if 173 has no
+		; target (the old one left), he becomes the one it chases
+		If NetMode = NET_HOST And N173_Active And N173_TargetStream = -1 And rp\stream > 0 Then
+			N173_TargetStream = rp\stream
+			N173_TargetX = dest\x : N173_TargetZ = dest\z
+		End If
 	ElseIf kind = "S" And NetMode = NET_CLIENT Then
 		; host is authoritative about SCP-173 and the breach door
 		Local sx# = Float(SplitPart(line$, 2))
@@ -484,10 +494,14 @@ Function NetUpdate()
 	NetTick = NetTick + 1
 
 	; "I am watching it": eyes open AND the statue inside the view frustum
+	; AND a clear line of sight. A player behind a wall is NOT watching it,
+	; even if he is staring in its direction - 173 keeps chasing then.
 	Local watching% = False
-	If GameState = GS_PLAY And N173_Obj <> 0 Then
+	If GameState = GS_PLAY And N173_Obj <> 0 And N173_Collider <> 0 And Collider <> 0 Then
 		If (BlinkTimer < -16 Or BlinkTimer > -6) Then
-			If EntityInView(N173_Obj, Camera) Then watching = True
+			If EntityInView(N173_Obj, Camera) Then
+				If EntityVisible(N173_Collider, Collider) Then watching = True
+			End If
 		End If
 	End If
 
@@ -522,8 +536,13 @@ Function NetUpdate()
 				If NetMode = NET_CLIENT Then NetLastHostMsg = MilliSecs()
 				Select l$
 					Case "BYE"
-						NetKicked = True
-						NetKickMsg = "The host left the room. Returned to the main menu."
+						If NetMode = NET_CLIENT Then
+							NetKicked = True
+							NetKickMsg = "The host left the room. Returned to the main menu."
+						Else
+							; a client left the room - reap him this frame
+							r\lastSeen = MilliSecs() - 99999
+						End If
 					Case "K"
 						If NetMode = NET_CLIENT Then KillPlayer()
 					Case "HB"
@@ -536,17 +555,36 @@ Function NetUpdate()
 	Next
 
 	If NetMode = NET_HOST Then
-		; the statue may only move when NOBODY is watching it
+		NetReapPlayers()
+		; the statue may only move when NOBODY with a real line of sight is
+		; watching it. A player hidden behind a wall never counts, even if
+		; his client says he is looking in this direction.
 		NetRemoteWatching = False
 		Local w.RemotePlayer
 		For w = Each RemotePlayer
-			If w\observing <> 0 Then NetRemoteWatching = True
+			If w\observing <> 0 And N173SeePlayer(w\stream, w\x, w\z) Then NetRemoteWatching = True
 		Next
 		N173ChooseTarget()
 	End If
 
 	NetCheckHostGone()
 	If NetMsgTimer > 0 Then NetMsgTimer = NetMsgTimer - FpsFactor
+End Function
+
+; A player who left or lost his connection: delete his body, close his
+; stream and make 173 forget him. A player who joins later is a fresh
+; target again (N173ChooseTarget sees every live RemotePlayer).
+Function NetReapPlayers()
+	If NetMode <> NET_HOST Then Return
+	Local rp.RemotePlayer
+	For rp = Each RemotePlayer
+		If rp\stream > 0 And MilliSecs() - rp\lastSeen > 3500 Then
+			N173RejectTarget(rp\stream)
+			If rp\obj <> 0 Then FreeEntity rp\obj
+			CloseTCPStream rp\stream
+			Delete rp
+		End If
+	Next
 End Function
 
 ; Host tells one player that 173 caught him.
