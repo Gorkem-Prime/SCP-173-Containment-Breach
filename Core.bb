@@ -28,6 +28,24 @@ Type Materials
 	Field Diff%
 End Type
 
+; ----- network types (declared here so every included file can use them)
+Type RemotePlayer
+	Field stream%       ; TCP stream handle (0 = the host's broadcast)
+	Field obj%          ; the figure drawn for this player
+	Field x#, y#, z#, yaw#
+	Field observing%    ; eyes open and 173 inside his view frustum
+	Field lastSeen%     ; last time data arrived (host drop detection)
+	Field tag$          ; label drawn above the figure
+End Type
+
+Type NetRoom
+	Field name$
+	Field ip$
+	Field port%
+	Field players%
+	Field seen%
+End Type
+
 ; ----- engine --------------------------------------------------------
 Global Camera%, Collider%, RoomObj%
 Global FpsFactor# = 1.0

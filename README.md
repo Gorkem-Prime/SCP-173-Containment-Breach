@@ -44,7 +44,7 @@ tek başına çalışan bir Blitz3D mini oyunu.
 8. Ölünce **Space** veya **Enter** ile yeniden spawn olursunuz (respawn).
    Tur sıfırlanmaz: harita, açılan kapı ve mermi durumu korunur; SCP-173 öldükten
    sonra haritanın bir köşesine çekilip orada bekler.
-9. **ESC** ile oyunu durdurup (RESUME / RESTART ROUND / MAIN MENU / QUIT)
+9. **ESC** ile oyunu durdurup (RESUME / RESTART ROUND / MAIN MENU / LEAVE LAN / QUIT)
    menüsüne erişebilirsiniz. **F11** ile 1920x1080 tam ekran / 1280x720
    pencere modu arasında geçiş yapabilirsiniz.
 10. Menülerde fareyle tıklama veya klavye ile seçim yapılabilir: ana menüde
@@ -72,8 +72,15 @@ tek başına çalışan bir Blitz3D mini oyunu.
 14. **MULTIPLAYER** menüsünden LAN üzerinde oda oluşturabilir veya açık odalara
     katılabilirsiniz. **JOIN ROOM** IP adresi sormaz; aynı ağdaki odaları
     otomatik tarar ve listede gösterir (REFRESH ile yenilenir). Sunucu `5555`
-    portunu açar; SCP-173'ü host yönetir, diğer oyuncular mavi avatar
-    küpleriyle görünür. Kısayollar: `1=CREATE ROOM 2=JOIN ROOM 3=BACK`.
+    portunu açar; SCP-173'ü host yönetir. Diğer oyuncular turuncu D-class
+    kıyafetleriyle, üstlerinde `D-...` / `HOST` etiketiyle görünür; biri 173'ü
+    izliyorsa etiketinde `WATCHING` yazar. SCP-173 yalnızca **hiç kimse** ona
+    bakmadığında hareket eder ve her zaman en yakın oyuncuyu değil, gördüğü /
+    son gördüğü oyuncuyu kovalar. Host odadan çıkarsa (BYE veya bağlantı
+    kopması) bütün oyuncular ana menüye atılır. **ESC** ile açılan menüden
+    `MAIN MENU` LAN bağlantısını kapatmaz; bağlantıyı kapatmak için `LEAVE LAN`
+    (`6`) kullanılır. Kısayollar: `1=CREATE ROOM 2=JOIN ROOM 3=BACK
+    4=LEAVE LAN`.
 
 ## Ayarlar
 

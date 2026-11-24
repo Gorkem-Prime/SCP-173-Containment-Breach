@@ -43,6 +43,13 @@ Global N173_SoundChn% = 0
 Global N173_Active% = False
 Global N173HomeX#, N173HomeY#, N173HomeZ#
 
+; ----- multiplayer target --------------------------------------------
+; -1 = nobody, 0 = the host player, >0 = a remote player's TCP stream.
+; 173 keeps its last target until it loses sight of him, instead of
+; instantly switching to whoever happens to be closest.
+Global N173_TargetStream% = -1
+Global N173_TargetX# = 0.0, N173_TargetZ# = 0.0
+
 ; ----- containment door ---------------------------------------------
 Global DoorPivot%, DoorLeft%, DoorRight%
 Global DoorOpenState# = 0.0
@@ -356,6 +363,8 @@ Function BuildWorld()
 	N173HomeX = 1472 * RoomScale : N173HomeY = 0.35 : N173HomeZ = 912 * RoomScale
 
 	ResetRound()
+	; rebuild the remote player figures on the new world
+	NetRebuildAvatars()
 End Function
 
 ; =====================================================================
@@ -371,6 +380,7 @@ Function ResetRound()
 	ResetEntity N173_Collider
 	N173_Active = False
 	N173_EnemyX = 0 : N173_EnemyZ = 0
+	N173_TargetStream = -1 : N173_TargetX = 0 : N173_TargetZ = 0
 	N173_State = 0 : N173_PrevX = N173HomeX : N173_PrevZ = N173HomeZ
 	N173_LastDist = 0 : N173_Drop = 0
 	HideEntity N173_Box
@@ -583,8 +593,12 @@ Function Update173()
 		Return
 	End If
 
-	; where the statue was before this frame - used to reject illegal moves
-	Local dist# = EntityDistance(N173_Collider, Collider)
+	; distance to the CURRENT target (not simply the closest player)
+	Local tx0# = N173_TargetX, tz0# = N173_TargetZ
+	If N173_TargetStream <= 0 Then
+		tx0 = EntityX(Collider, True) : tz0 = EntityZ(Collider, True)
+	End If
+	Local dist# = Distance(EntityX(N173_Collider, True), EntityZ(N173_Collider, True), tx0, tz0)
 
 	; proximity drives the red danger vignette and the FOV tightening
 	FX_Danger = Curve(Clamp((4.5 - dist) / 4.5, 0.0, 1.0), FX_Danger, 10.0)
@@ -599,14 +613,11 @@ Function Update173()
 		If Rand(120) = 1 Then PlaySound RattleSnd(Rand(0, 2))
 	End If
 
-	; line of sight -> last known player position (NPCs.bb 704-714)
-	Local canSee% = False
-	If dist < 10.0 Then
-		If EntityVisible(N173_Collider, Collider) Then
-			canSee = True
-			N173_EnemyX = EntityX(Collider, True)
-			N173_EnemyZ = EntityZ(Collider, True)
-		End If
+	; line of sight -> last known target position (NPCs.bb 704-714)
+	Local canSee% = N173CanSeeTarget()
+	If canSee Then
+		N173_EnemyX = N173_TargetX
+		N173_EnemyZ = N173_TargetZ
 	End If
 
 	; movement volume / rolling stone sound (NPCs.bb 716-720)
@@ -616,12 +627,14 @@ Function Update173()
 	N173_PrevZ = EntityZ(N173_Collider)
 
 	; *** THE OBSERVATION CHECK ***
-	; Eyes open (or opening) AND the statue is inside the view frustum
-	; => it cannot move. During a blink it can.
+	; Eyes open (or opening) AND the statue inside the view frustum
+	; => it cannot move. During a blink it can. In multiplayer ANY player
+	; watching it freezes the statue - all observers must look away.
 	Local move% = True
 	If (BlinkTimer < -16 Or BlinkTimer > -6) Then
 		If EntityInView(N173_Obj, Camera) Then move = False
 	End If
+	If NetMode = NET_HOST And NetRemoteWatching <> 0 Then move = False
 
 	If move = False Then
 		; --- being watched: blur, zoom, heartbeat (NPCs.bb 730-756) ---
@@ -652,7 +665,7 @@ Function Update173()
 		; through walls and no landing inside geometry / outside the map
 		If dist > 45 Then
 			If Rand(90) = 1 Then
-				N173TryRelocate EntityX(Collider, True) - 14.0, EntityZ(Collider, True) + Rnd(-8, 8)
+				N173TryRelocate tx0 - 14.0, tz0 + Rnd(-8, 8)
 			End If
 		ElseIf dist > 12 Then
 			If Rand(120) = 1 Then
@@ -663,32 +676,38 @@ Function Update173()
 
 		If canSee And dist < 0.65 Then
 			; the kill (NPCs.bb 827-860)
-			If KillTimer >= 0 Then
-				DeathMSG = "Subject D-9341. Cause of death: Fatal cervical fracture. The surveillance tapes confirm that the subject was killed by SCP-173."
-				PlaySound NeckSnapSnd(Rand(0, 2))
-				If Rand(2) = 1 Then
-					TurnEntity Camera, 0, Rand(80, 100), 0
+			If KillTimer >= 0 Or N173_TargetStream > 0 Then
+				If N173_TargetStream > 0 Then
+					; the victim is a remote player - tell him, don't kill the host
+					NetKillRemote(N173_TargetStream)
+					N173HideInCorner()
 				Else
-					TurnEntity Camera, 0, Rand(-100, -80), 0
+					DeathMSG = "Subject D-9341. Cause of death: Fatal cervical fracture. The surveillance tapes confirm that the subject was killed by SCP-173."
+					PlaySound NeckSnapSnd(Rand(0, 2))
+					If Rand(2) = 1 Then
+						TurnEntity Camera, 0, Rand(80, 100), 0
+					Else
+						TurnEntity Camera, 0, Rand(-100, -80), 0
+					End If
+					KillPlayer()
 				End If
-				KillPlayer()
 			End If
 		Else
-			; walk towards the player (or the last place it saw him) using
-			; 360 degree raycasts, so walls never stop it permanently
+			; walk towards the current target (or the last place it saw him)
+			; using 360 degree raycasts, so walls never stop it permanently
 			Local tx#, tz#
 			If canSee Then
-				N173_EnemyX = EntityX(Collider, True)
-				N173_EnemyZ = EntityZ(Collider, True)
+				N173_EnemyX = N173_TargetX
+				N173_EnemyZ = N173_TargetZ
 			End If
 			If N173_EnemyX <> 0 Then
 				tx = N173_EnemyX : tz = N173_EnemyZ
 				If Distance(EntityX(N173_Collider, True), EntityZ(N173_Collider, True), tx, tz) < 0.8 Then
 					N173_EnemyX = 0 : N173_EnemyZ = 0
-					tx = EntityX(Collider, True) : tz = EntityZ(Collider, True)
+					tx = tx0 : tz = tz0
 				End If
 			Else
-				tx = EntityX(Collider, True) : tz = EntityZ(Collider, True)
+				tx = tx0 : tz = tz0
 			End If
 			N173SteerTo tx, tz
 		End If
@@ -699,6 +718,117 @@ Function Update173()
 
 	PositionEntity N173_Obj, EntityX(N173_Collider), 0.03, EntityZ(N173_Collider)
 	RotateEntity N173_Obj, 0, EntityYaw(N173_Collider) - 180, 0
+End Function
+
+; =====================================================================
+; Multiplayer targeting - 173 sticks to a target instead of always
+; switching to whoever is closest.
+; =====================================================================
+Function N173PlayerExists%(stream%)
+	If stream% < 0 Then Return False
+	If stream% = 0 Then Return True
+	Local rp.RemotePlayer
+	For rp = Each RemotePlayer
+		If rp\stream = stream% Then Return True
+	Next
+	Return False
+End Function
+
+Function N173PlayerX#(stream%)
+	If stream% <= 0 Then Return EntityX(Collider, True)
+	Local rp.RemotePlayer
+	For rp = Each RemotePlayer
+		If rp\stream = stream% Then Return rp\x
+	Next
+	Return N173_TargetX
+End Function
+
+Function N173PlayerZ#(stream%)
+	If stream% <= 0 Then Return EntityZ(Collider, True)
+	Local rp.RemotePlayer
+	For rp = Each RemotePlayer
+		If rp\stream = stream% Then Return rp\z
+	Next
+	Return N173_TargetZ
+End Function
+
+Function N173PlayerWatching%(stream%)
+	If stream% <= 0 Then Return 0
+	Local rp.RemotePlayer
+	For rp = Each RemotePlayer
+		If rp\stream = stream% Then Return Abs(rp\observing)
+	Next
+	Return 0
+End Function
+
+; Can 173 see this player from where it stands right now?
+Function N173SeePlayer%(stream%, x#, z#)
+	If stream% = -1 Then Return False
+	Local cx# = EntityX(N173_Collider, True), cz# = EntityZ(N173_Collider, True)
+	If Distance(cx, cz, x, z) > 10.0 Then Return False
+	If stream% <= 0 Then Return EntityVisible(N173_Collider, Collider)
+	Local dx# = x - cx, dz# = z - cz
+	Local dl# = Sqr(dx * dx + dz * dz)
+	If dl < 0.35 Then Return True
+	Return N173RayClearFrom(cx, cz, dx / dl, dz / dl, dl)
+End Function
+
+Function N173CanSeeTarget%()
+	If N173_TargetStream = -1 Then Return False
+	Return N173SeePlayer(N173_TargetStream, N173_TargetX, N173_TargetZ)
+End Function
+
+; pick a random player (never "the nearest one") when there is no target yet
+Function N173PickAnyPlayer%()
+	Local total% = 1, pick%, idx% = 1
+	Local rp.RemotePlayer
+	For rp = Each RemotePlayer
+		If rp\stream > 0 Then total = total + 1
+	Next
+	pick = Rand(0, total - 1)
+	If pick = 0 Then Return 0
+	For rp = Each RemotePlayer
+		If rp\stream > 0 Then
+			If idx = pick Then Return rp\stream
+			idx = idx + 1
+		End If
+	Next
+	Return 0
+End Function
+
+Function N173ChooseTarget()
+	If Not N173_Active Then Return
+	Local cur% = N173_TargetStream
+	If Not N173PlayerExists(cur) Then cur = -1
+	If cur = -1 Then cur = N173PickAnyPlayer()
+
+	Local px# = N173PlayerX(cur), pz# = N173PlayerZ(cur)
+	If N173SeePlayer(cur, px, pz) Then
+		; still has the target in sight - keep chasing him
+		N173_TargetStream = cur
+		N173_TargetX = px : N173_TargetZ = pz
+		Return
+	End If
+
+	; target lost: look for a visible player, preferring one who is watching
+	Local best% = -1
+	Local rp.RemotePlayer
+	If N173SeePlayer(0, N173PlayerX(0), N173PlayerZ(0)) Then best = 0
+	For rp = Each RemotePlayer
+		If rp\stream > 0 Then
+			If N173SeePlayer(rp\stream, rp\x, rp\z) Then
+				If N173PlayerWatching(rp\stream) <> 0 Then best = rp\stream : Exit
+				If best = -1 Or Rand(2) = 0 Then best = rp\stream
+			End If
+		End If
+	Next
+	If best <> -1 Then cur = best
+	N173_TargetStream = cur
+	; update the coordinates only while he is actually seen: otherwise 173
+	; keeps chasing the last known position, like in the single player game
+	If N173SeePlayer(cur, N173PlayerX(cur), N173PlayerZ(cur)) Then
+		N173_TargetX = N173PlayerX(cur) : N173_TargetZ = N173PlayerZ(cur)
+	End If
 End Function
 
 ; =====================================================================
@@ -810,6 +940,7 @@ Function N173HideInCorner()
 	RotateEntity N173_Collider, 0, 90, 0, True
 	N173_State = 0
 	N173_EnemyX = 0 : N173_EnemyZ = 0
+	N173_TargetStream = -1 : N173_TargetX = N173HomeX : N173_TargetZ = N173HomeZ
 	N173_PrevX = N173HomeX : N173_PrevZ = N173HomeZ
 	N173_LastDist = 0
 	Keep173InBounds()

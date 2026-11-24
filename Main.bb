@@ -173,12 +173,8 @@ Function ToggleFullscreen()
 		KillTimer = killT : DeathMSG = death
 		GameState = oldState
 
-		; bring the LAN session back if there was one
-		If netMode = NET_HOST Then
-			NetStartHost()
-		ElseIf netMode = NET_CLIENT Then
-			NetJoinRoom(netIP)
-		End If
+		; the TCP/UDP streams survive a graphics mode switch - DestroyWorld()
+		; now preserves the LAN, so there is nothing to reconnect here
 	End If
 
 	If GameState = GS_PLAY Or GameState = GS_DEAD Then
@@ -191,7 +187,9 @@ Function ToggleFullscreen()
 End Function
 
 Function DestroyWorld()
-	NetDisconnect()
+	; ESC / MAIN MENU / fullscreen must not close the LAN session. Only an
+	; explicit "LEAVE LAN" (or the host going away) disconnects.
+	If NetPreserve = 0 Then NetDisconnect()
 	If N173_SoundChn <> 0 Then
 		StopChannel N173_SoundChn
 		N173_SoundChn = 0
@@ -199,6 +197,7 @@ Function DestroyWorld()
 	; bullets / impact sparks own entities that ClearWorld is about to free
 	P90_Reset()
 	ClearWorld()
+	NetClearAvatarRefs()
 	; LoadRoomMesh caches texture handles - ClearWorld just freed them, so
 	; the cache must be emptied or a rebuilt map would use dead textures
 	ClearMaterialCache()
@@ -224,6 +223,16 @@ Repeat
 	; F11 toggles fullscreen at any time
 	If KeyHit(87) Then ToggleFullscreen()
 
+	; host gone / kicked -> everybody returns to the main menu
+	If NetKicked Then
+		NetDisconnect()
+		DestroyWorld()
+		GameState = GS_MENU : MenuTab = 0 : NetRoomList = False
+		EnterMouseMode()
+		NetMsg = NetKickMsg : NetMsgTimer = 400
+		NetKicked = False
+	End If
+
 	; track the menu cursor ourselves (independent of pointer capture)
 	If GameState = GS_MENU Or GameState = GS_PAUSE Then
 		If VirtMouseReady Then
@@ -239,6 +248,7 @@ Repeat
 	GameTime = GameTime + FpsFactor / 70.0
 
 	If GameState = GS_MENU Then
+		If NetMode <> NET_OFFLINE Then NetIdle()
 		If (MenuTab = 1 Or MenuTab = 2) And KeyHit(1) Then
 			If NetRoomList Then
 				; ESC inside the room list -> back to the multiplayer menu
@@ -269,8 +279,9 @@ Repeat
 				UpdatePlayer()
 				UpdateCellDoors()
 				UpdateDoor()
-				If NetMode <> NET_CLIENT Then Update173()
+				; net first: host collects who is watching, then 173 decides
 				NetUpdate()
+				If NetMode <> NET_CLIENT Then Update173()
 			Else
 				UpdateDeath()
 				; respawn WITHOUT resetting the round (173 stays in its

@@ -107,17 +107,27 @@ Function DrawPauseMenu()
 
 	If DrawBtn(bx, by, bw, bh, "RESUME") Or KeyHit(2) Then ResumeGame()
 	If DrawBtn(bx, by + gap, bw, bh, "RESTART ROUND") Or KeyHit(3) Then ResetRound()
+	; ESC / MAIN MENU keeps the LAN room alive - use LEAVE LAN to quit it
 	If DrawBtn(bx, by + gap * 2, bw, bh, "MAIN MENU") Or KeyHit(4) Then
 		DestroyWorld()
 		GameState = GS_MENU
 		MenuTab = 0
 		EnterMouseMode()
 	End If
-	If DrawBtn(bx, by + gap * 3, bw, bh, "QUIT") Or KeyHit(5) Then End
+	If NetMode <> NET_OFFLINE Then
+		If DrawBtn(bx, by + gap * 3, bw, bh, "LEAVE LAN") Or KeyHit(6) Then
+			NetLeaveLAN()
+			DestroyWorld()
+			GameState = GS_MENU
+			MenuTab = 0
+			EnterMouseMode()
+		End If
+	End If
+	If DrawBtn(bx, by + gap * 4, bw, bh, "QUIT") Or KeyHit(5) Then End
 
 	SetFont FntSmall
 	Color 120, 120, 125
-	Text GraphW / 2, GraphH - 45 * MenuScale, "1 = resume   2 = restart   3 = main menu   4 = quit", True
+	Text GraphW / 2, GraphH - 45 * MenuScale, "1 = resume   2 = restart   3 = main menu   4 = leave LAN   5 = quit", True
 	DrawCursor()
 End Function
 
@@ -157,10 +167,18 @@ Function UpdateMultiplayerMenu()
 
 	If DrawBtn(bx, by + gap * 2, bw, bh, "BACK") Or KeyHit(4) Then MenuTab = 0
 
+	If NetMode <> NET_OFFLINE Then
+		If DrawBtn(bx, by + gap * 3, bw, bh, "LEAVE LAN") Or KeyHit(6) Then
+			NetLeaveLAN()
+			NetMsg = "You left the LAN room."
+			NetMsgTimer = 300
+		End If
+	End If
+
 	Color 150, 150, 155
-	Text GraphW / 2, by + gap * 3, "Rooms on your local network are found automatically.", True
+	Text GraphW / 2, by + gap * 4, "Rooms on your local network are found automatically.", True
 	Color 120, 200, 255
-	Text GraphW / 2, by + gap * 3 + 30 * MenuScale, NetMsg, True
+	Text GraphW / 2, by + gap * 4 + 30 * MenuScale, NetMsg, True
 	DrawCursor()
 End Function
 
@@ -269,6 +287,7 @@ Function UpdateMainMenu()
 		Local gap# = 78 * MenuScale
 
 		If DrawBtn(bx, by, bw, bh, "PLAY") Or KeyHit(2) Then
+			If NetMode <> NET_OFFLINE Then NetLeaveLAN()
 			BuildWorld()
 			FlushKeys() : FlushMouse()
 		End If

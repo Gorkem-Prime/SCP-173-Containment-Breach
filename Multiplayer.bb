@@ -8,9 +8,10 @@
 ;   client : needs no IP - it scans the local subnet with unicast UDP
 ;            queries and lists every room that answers
 ;
-; The host runs SCP-173's AI and sends its position to clients. Every
-; player sends their own position, so everybody sees an avatar cube for
-; the other players.
+; The host runs SCP-173's AI and sends its position to clients. Other
+; players are drawn as Class-D subject figures (suit, head, limbs + a
+; floating subject tag), not cubes. The host also collects every player's
+; "am I watching 173?" state: the statue only moves when NOBODY watches it.
 ; =====================================================================
 
 Const NET_PORT% = 5555
@@ -28,6 +29,17 @@ Global NetMsg$ = ""
 Global NetMsgTimer# = 0.0
 Global NetAvatarMesh% = 0
 
+; LAN connection outlives a round / a trip to the main menu. It is only
+; closed by an explicit "LEAVE LAN" (or when the host sends BYE).
+Global NetPreserve% = False
+Global NetKicked% = False
+Global NetKickMsg$ = ""
+Global NetLastHostMsg% = 0
+; True when at least one REMOTE player is currently watching SCP-173
+Global NetRemoteWatching% = False
+; on a client this is the avatar that represents the host
+Global NetHostAvatar.RemotePlayer
+
 ; room shown in the discovery replies
 Global NetRoomName$ = "SCP-173 ROOM"
 
@@ -42,20 +54,6 @@ Global NetScanIPs% = 0
 Dim NetScanBase%(15)
 Global NetScanIdx% = 0
 Global NetScanT# = 0.0
-
-Type RemotePlayer
-	Field stream%
-	Field obj%
-	Field x#, y#, z#, yaw#
-End Type
-
-Type NetRoom
-	Field name$
-	Field ip$
-	Field port%
-	Field players%
-	Field seen%
-End Type
 
 Function SplitPart$(s$, idx%)
 	Local cur% = 1, res$ = "", ch$, i%
@@ -75,21 +73,90 @@ End Function
 ; ---------------------------------------------------------------------
 ; avatars
 ; ---------------------------------------------------------------------
+; A remote player is a Class-D subject: orange suit, pale head, dark visor,
+; arms and legs. All parts are non-pickable so 173's raycasts ignore them.
+Function NetBuildAvatarTemplate()
+	If NetAvatarMesh <> 0 Then Return
+
+	Local root% = CreatePivot()
+	Local part%
+	part = CreateCube() : EntityParent part, root
+	ScaleEntity part, 0.34, 0.56, 0.20 : PositionEntity part, 0, 1.05, 0
+	EntityColor part, 205, 120, 35 : EntityPickMode part, 0
+
+	part = CreateSphere() : EntityParent part, root
+	ScaleEntity part, 0.17, 0.19, 0.17 : PositionEntity part, 0, 1.56, 0
+	EntityColor part, 195, 175, 150 : EntityPickMode part, 0
+
+	part = CreateCube() : EntityParent part, root
+	ScaleEntity part, 0.23, 0.07, 0.05 : PositionEntity part, 0, 1.59, 0.15
+	EntityColor part, 25, 25, 30 : EntityPickMode part, 0
+
+	part = CreateCube() : EntityParent part, root
+	ScaleEntity part, 0.10, 0.48, 0.12 : PositionEntity part, -0.26, 1.06, 0
+	EntityColor part, 190, 110, 30 : EntityPickMode part, 0
+
+	part = CreateCube() : EntityParent part, root
+	ScaleEntity part, 0.10, 0.48, 0.12 : PositionEntity part, 0.26, 1.06, 0
+	EntityColor part, 190, 110, 30 : EntityPickMode part, 0
+
+	part = CreateCube() : EntityParent part, root
+	ScaleEntity part, 0.13, 0.60, 0.14 : PositionEntity part, -0.11, 0.30, 0
+	EntityColor part, 75, 78, 88 : EntityPickMode part, 0
+
+	part = CreateCube() : EntityParent part, root
+	ScaleEntity part, 0.13, 0.60, 0.14 : PositionEntity part, 0.11, 0.30, 0
+	EntityColor part, 75, 78, 88 : EntityPickMode part, 0
+
+	HideEntity root
+	NetAvatarMesh = root
+End Function
+
+Function NetSpawnAvatar%()
+	If NetAvatarMesh = 0 Then NetBuildAvatarTemplate()
+	Local o% = CopyEntity(NetAvatarMesh)
+	ShowEntity o
+	Return o
+End Function
+
 Function NetMakeAvatar.RemotePlayer(stream%)
 	Local rp.RemotePlayer = New RemotePlayer
 	rp\stream = stream
-	If NetAvatarMesh = 0 Then NetAvatarMesh = CreateCube()
-	rp\obj = CopyEntity(NetAvatarMesh)
-	ScaleEntity rp\obj, 0.35, 1.7, 0.35
-	EntityColor rp\obj, 70, 140, 230
-	HideEntity rp\obj
+	rp\obj = NetSpawnAvatar()
+	rp\tag = "D-" + stream
+	rp\lastSeen = MilliSecs()
 	Return rp
+End Function
+
+; ClearWorld() frees every entity, including the template and all copies.
+Function NetClearAvatarRefs()
+	Local rp.RemotePlayer
+	For rp = Each RemotePlayer
+		rp\obj = 0
+	Next
+	NetAvatarMesh = 0
+End Function
+
+; Rebuild the figures after a world rebuild (new round / fullscreen switch).
+Function NetRebuildAvatars()
+	Local rp.RemotePlayer
+	For rp = Each RemotePlayer
+		If rp\obj <> 0 Then FreeEntity rp\obj
+		rp\obj = 0
+		If rp\stream <> NetStream Or NetMode = NET_HOST Then
+			rp\obj = NetSpawnAvatar()
+			PositionEntity rp\obj, rp\x, rp\y + 0.9, rp\z
+			RotateEntity rp\obj, 0, rp\yaw, 0
+		End If
+	Next
 End Function
 
 ; ---------------------------------------------------------------------
 ; Host / join
 ; ---------------------------------------------------------------------
 Function NetStartHost%()
+	If NetMode = NET_HOST Then Return True
+	If NetMode = NET_CLIENT Then NetDisconnect()
 	NetServer = CreateTCPServer(NET_PORT)
 	If NetServer = 0 Then
 		NetMsg = "Could not open port " + NET_PORT
@@ -97,6 +164,8 @@ Function NetStartHost%()
 		Return False
 	End If
 	NetMode = NET_HOST
+	NetPreserve = True
+	NetKicked = False
 	NetMsg = "Room created. Waiting for players on port " + NET_PORT
 	NetMsgTimer = 400
 	NetDiscStartHost()
@@ -104,6 +173,7 @@ Function NetStartHost%()
 End Function
 
 Function NetJoinRoom%(ip$)
+	If NetMode <> NET_OFFLINE Then NetDisconnect()
 	If ip$ = "" Then ip$ = "127.0.0.1"
 	NetStream = OpenTCPStream(ip$, NET_PORT)
 	If NetStream = 0 Then
@@ -111,9 +181,16 @@ Function NetJoinRoom%(ip$)
 		NetMsgTimer = 300
 		Return False
 	End If
-	NetIP = ip$
-	NetMode = NET_CLIENT
-	NetMakeAvatar(NetStream)
+	NetIP = ip$ : NetMode = NET_CLIENT
+	NetPreserve = True : NetKicked = False
+	NetLastHostMsg = MilliSecs()
+	; the client needs an entry to read the host's stream, but must NOT
+	; draw itself as a third-person figure
+	Local me.RemotePlayer = New RemotePlayer
+	me\stream = NetStream : me\obj = 0 : me\tag = "YOU"
+	me\lastSeen = MilliSecs()
+	NetHostAvatar = New RemotePlayer
+	NetHostAvatar\stream = 0 : NetHostAvatar\tag = "HOST"
 	NetMsg = "Connected to " + ip$
 	NetMsgTimer = 300
 	Return True
@@ -121,6 +198,12 @@ End Function
 
 Function NetDisconnect()
 	Local rp.RemotePlayer
+	; tell the other players that the host is gone before closing the pipes
+	If NetMode = NET_HOST Then
+		For rp = Each RemotePlayer
+			If rp\stream <> 0 Then WriteLine rp\stream, "BYE"
+		Next
+	End If
 	If NetServer <> 0 Then CloseTCPServer NetServer
 	If NetStream <> 0 Then CloseTCPStream NetStream
 	For rp = Each RemotePlayer
@@ -132,7 +215,50 @@ Function NetDisconnect()
 	NetAvatarMesh = 0
 	NetServer = 0 : NetStream = 0
 	NetMode = NET_OFFLINE
+	NetPreserve = False : NetKicked = False
+	NetRemoteWatching = False
+	NetHostAvatar = Null
 	NetDiscStop()
+End Function
+
+; Explicitly leave the LAN (used by the menu button / PLAY / CREATE / JOIN).
+Function NetLeaveLAN()
+	If NetMode = NET_OFFLINE Then Return
+	NetDisconnect()
+End Function
+
+; Called while in the main menu so a paused / menuing host still answers
+; clients and keeps the session alive.
+Function NetIdle()
+	If NetMode = NET_OFFLINE Then Return
+	NetDiscPoll()
+	NetTick = NetTick + 1
+	If NetMode = NET_HOST Then
+		Local s% = AcceptTCPStream(NetServer)
+		If s <> 0 Then NetMakeAvatar(s)
+	End If
+	Local rp.RemotePlayer
+	For rp = Each RemotePlayer
+		If rp\stream <> 0 And ReadAvail(rp\stream) > 0 Then
+			Local l$ = ReadLine$(rp\stream)
+			rp\lastSeen = MilliSecs()
+			If NetMode = NET_CLIENT Then NetLastHostMsg = MilliSecs()
+			If l <> "" And l <> "HB" Then NetApplyLine l$, rp
+		End If
+		If NetMode = NET_HOST And NetTick Mod 10 = 0 Then WriteLine rp\stream, "HB"
+	Next
+	NetCheckHostGone()
+End Function
+
+; If the host disappears (quits / crashes / network dies), every client
+; goes back to the main menu instead of being stuck in a dead room.
+Function NetCheckHostGone()
+	If NetMode <> NET_CLIENT Then Return
+	If NetStream = 0 Then Return
+	If MilliSecs() - NetLastHostMsg > 3500 Then
+		NetKicked = True
+		NetKickMsg = "The host left the room. Returned to the main menu."
+	End If
 End Function
 
 ; ---------------------------------------------------------------------
@@ -305,14 +431,18 @@ End Function
 Function NetApplyLine(line$, rp.RemotePlayer)
 	Local kind$ = SplitPart(line$, 1)
 	If kind = "P" Then
-		rp\x = Float(SplitPart(line$, 2))
-		rp\y = Float(SplitPart(line$, 3))
-		rp\z = Float(SplitPart(line$, 4))
-		rp\yaw = Float(SplitPart(line$, 5))
-		If rp\obj <> 0 Then
-			PositionEntity rp\obj, rp\x, rp\y + 0.9, rp\z
-			RotateEntity rp\obj, 0, rp\yaw, 0
-			ShowEntity rp\obj
+		Local dest.RemotePlayer = rp
+		If NetMode = NET_CLIENT And NetHostAvatar <> Null Then dest = NetHostAvatar
+		dest\x = Float(SplitPart(line$, 2))
+		dest\y = Float(SplitPart(line$, 3))
+		dest\z = Float(SplitPart(line$, 4))
+		dest\yaw = Float(SplitPart(line$, 5))
+		dest\observing = Int(SplitPart(line$, 6))
+		dest\lastSeen = MilliSecs()
+		If NetMode = NET_CLIENT Then NetLastHostMsg = MilliSecs()
+		If dest\obj <> 0 Then
+			PositionEntity dest\obj, dest\x, dest\y + 0.9, dest\z
+			RotateEntity dest\obj, 0, dest\yaw, 0
 		End If
 	ElseIf kind = "S" And NetMode = NET_CLIENT Then
 		; host is authoritative about SCP-173 and the breach door
@@ -352,8 +482,17 @@ Function NetUpdate()
 	End If
 
 	NetTick = NetTick + 1
+
+	; "I am watching it": eyes open AND the statue inside the view frustum
+	Local watching% = False
+	If GameState = GS_PLAY And N173_Obj <> 0 Then
+		If (BlinkTimer < -16 Or BlinkTimer > -6) Then
+			If EntityInView(N173_Obj, Camera) Then watching = True
+		End If
+	End If
+
 	If NetTick Mod 3 = 0 Then
-		Local line$ = "P|" + Str(EntityX(Collider, True)) + "|" + Str(EntityY(Collider, True)) + "|" + Str(EntityZ(Collider, True)) + "|" + Str(EntityYaw(Collider))
+		Local line$ = "P|" + Str(EntityX(Collider, True)) + "|" + Str(EntityY(Collider, True)) + "|" + Str(EntityZ(Collider, True)) + "|" + Str(EntityYaw(Collider)) + "|" + Str(Abs(watching))
 		If NetMode = NET_CLIENT And NetStream <> 0 Then WriteLine NetStream, line$
 		Local rp.RemotePlayer
 		For rp = Each RemotePlayer
@@ -366,6 +505,12 @@ Function NetUpdate()
 			Next
 		End If
 	End If
+	If NetTick Mod 10 = 0 Then
+		Local hb.RemotePlayer
+		For hb = Each RemotePlayer
+			If hb\stream <> 0 Then WriteLine hb\stream, "HB"
+		Next
+	End If
 
 	; read incoming messages
 	Local r.RemotePlayer
@@ -373,12 +518,51 @@ Function NetUpdate()
 		If r\stream <> 0 Then
 			While ReadAvail(r\stream) > 0
 				Local l$ = ReadLine$(r\stream)
-				If l$ <> "" Then NetApplyLine l$, r
+				r\lastSeen = MilliSecs()
+				If NetMode = NET_CLIENT Then NetLastHostMsg = MilliSecs()
+				Select l$
+					Case "BYE"
+						NetKicked = True
+						NetKickMsg = "The host left the room. Returned to the main menu."
+					Case "K"
+						If NetMode = NET_CLIENT Then KillPlayer()
+					Case "HB"
+						; keepalive - nothing to do
+					Default
+						If l$ <> "" Then NetApplyLine l$, r
+				End Select
 			Wend
 		End If
 	Next
 
+	If NetMode = NET_HOST Then
+		; the statue may only move when NOBODY is watching it
+		NetRemoteWatching = False
+		Local w.RemotePlayer
+		For w = Each RemotePlayer
+			If w\observing <> 0 Then NetRemoteWatching = True
+		Next
+		N173ChooseTarget()
+	End If
+
+	NetCheckHostGone()
 	If NetMsgTimer > 0 Then NetMsgTimer = NetMsgTimer - FpsFactor
+End Function
+
+; Host tells one player that 173 caught him.
+Function NetKillRemote%(stream%)
+	If stream% = 0 Then Return False
+	Local rp.RemotePlayer
+	For rp = Each RemotePlayer
+		If rp\stream = stream% Then
+			WriteLine rp\stream, "K"
+			rp\observing = 0
+			NetMsg = rp\tag + " was killed by SCP-173."
+			NetMsgTimer = 220
+			Return True
+		End If
+	Next
+	Return False
 End Function
 
 Function NetDrawStatus()
@@ -392,6 +576,32 @@ Function NetDrawStatus()
 		SetFont FntSmall
 		Color 120, 200, 255
 		Text GraphW - 20 * MenuScale, 60 * MenuScale, "LAN: " + NetModeName$(), True
+
+		; subject tags over the other players - a Class-D figure without a
+		; label has no meaning, so always show who it is and whether that
+		; person is currently keeping 173 frozen
+		Local rp.RemotePlayer
+		Local camx# = EntityX(Camera, True), camz# = EntityZ(Camera, True)
+		Local cyaw# = EntityYaw(Camera, True)
+		For rp = Each RemotePlayer
+			If rp\obj <> 0 And EntityInView(rp\obj, Camera) Then
+				Local dx# = EntityX(rp\obj, True) - camx
+				Local dz# = EntityZ(rp\obj, True) - camz
+				Local fwd# = -Sin(cyaw) * dx + Cos(cyaw) * dz
+				If fwd > 0.5 And fwd < 80 Then
+					Local right# = Cos(cyaw) * dx + Sin(cyaw) * dz
+					Local sc# = GraphH * 0.75 / fwd
+					Local lx% = GraphW / 2 + right * sc
+					Local ly% = GraphH / 2 - (EntityY(rp\obj, True) - EntityY(Camera, True)) * sc - 30 * MenuScale
+					Color 215, 190, 130
+					Text lx, ly, rp\tag, True
+					If rp\observing <> 0 Then
+						Color 130, 220, 160
+						Text lx, ly - 18 * MenuScale, "WATCHING", True
+					End If
+				End If
+			End If
+		Next
 		SetFont FntTitle
 	End If
 End Function
